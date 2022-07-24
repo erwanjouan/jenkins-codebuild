@@ -1,1 +1,0 @@
-{"buildTargets":["deploy","destroy","logs","start","stop"],"launchTargets":[],"customConfigurationProvider":{"workspaceBrowse":{"browsePath":[],"compilerArgs":[]},"fileIndex":[]}}
