@@ -12,3 +12,4 @@ services:
     volumes:
       - /home/${HOST_USER}/jenkins_compose/jenkins_configuration:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: 2048M

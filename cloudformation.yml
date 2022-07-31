@@ -7,7 +7,7 @@ Parameters:
 Resources:
 
   ArtifactOutputBucket:
-    Description: Bucket for output
+    Description: Bucket for build output and Maven cache
     Properties:
       BucketName: !Sub '${ProjectName}-output'
     Type: AWS::S3::Bucket
@@ -22,7 +22,7 @@ Resources:
           Action: sts:AssumeRole
       Path: /
       Policies:
-        - PolicyName: allow-to-push-to-S3
+        - PolicyName: codebuild-service-role
           PolicyDocument:
             Statement:
               - Effect: Allow
@@ -46,6 +46,9 @@ Resources:
               - Effect: Allow
                 Action: cloudformation:CreateStack
                 Resource: '*'
+              - Effect: Allow
+                Action: ecr:CreateRepository
+                Resource: '*'
     Type: AWS::IAM::Role
 
   CodeBuildAwsCliProject:
@@ -56,18 +59,6 @@ Resources:
       Source:
         Type: GITHUB
         Location: https://github.com/erwanjouan/aws-dev-spring-boot-dockerfile
-        BuildSpec: |
-          version: 0.2
-          phases:
-            pre_build:
-              commands:
-                - aws --version
-                - docker --version
-                - java --version
-                - mvn --version
-            build:
-              commands:
-                - aws sts get-caller-identity
       Artifacts:
         Type: NO_ARTIFACTS
       Environment:
