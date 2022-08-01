@@ -46,9 +46,8 @@ Resources:
               - Effect: Allow
                 Action: cloudformation:CreateStack
                 Resource: '*'
-              - Effect: Allow
-                Action: ecr:CreateRepository
-                Resource: '*'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
     Type: AWS::IAM::Role
 
   CodeBuildAwsCliProject:
