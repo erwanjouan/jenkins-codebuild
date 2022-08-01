@@ -3,6 +3,15 @@ Description: A CodeBuild Project to trigger AWS CLI command from AWS
 Parameters:
   ProjectName:
     Type: String
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  JenkinsPort:
+    Type: Number
+    Default: 8080
+  DefaultSecurityGroupId:
+    Type: String
+    Default: sg-2de20856
 
 Resources:
 
@@ -11,6 +20,7 @@ Resources:
     Properties:
       BucketName: !Sub '${ProjectName}-output'
     Type: AWS::S3::Bucket
+
   CodeBuildServiceRole:
     Properties:
       AssumeRolePolicyDocument:
@@ -70,3 +80,63 @@ Resources:
             Type: PLAINTEXT
             Value: eu-west-1
     Type: AWS::CodeBuild::Project
+  
+  
+  ##########################
+  # EC2 Instance
+  ##########################
+
+  JenkinsSecurityGroupIngress:
+    Properties: 
+      GroupId: !Ref DefaultSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      CidrIp: 0.0.0.0/0
+    Type: AWS::EC2::SecurityGroupIngress
+
+  JenkinsEc2IamRole:
+    Properties:
+      RoleName: JenkinsEc2RoleForSSM
+      Description: EC2 IAM role for SSM access
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    Type: AWS::IAM::Role
+
+  JenkinsEc2InstanceProfile:
+    Properties:
+      InstanceProfileName: JenkinsEc2InstanceProfileForSSM
+      Roles:
+        - !Ref JenkinsEc2IamRole
+    Type: AWS::IAM::InstanceProfile
+
+  JenkinsEc2Instance:
+    Properties:
+      IamInstanceProfile: !Ref JenkinsEc2InstanceProfile
+      InstanceType: t3.small
+      ImageId: !Ref LatestAmiId
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+            rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key
+            yum upgrade
+            amazon-linux-extras install java-openjdk11 -y
+            yum install jenkins -y
+            systemctl enable jenkins
+            systemctl start jenkins
+            systemctl status jenkins
+      Tags:
+        - Key: Name
+          Value: 'Jenkins Controller'
+
+    Type: AWS::EC2::Instance
