@@ -131,7 +131,7 @@ Resources:
             rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key
             yum upgrade
             amazon-linux-extras install java-openjdk11 -y
-            yum install jenkins -y
+            yum install -y jenkins git
             systemctl enable jenkins
             systemctl start jenkins
             systemctl status jenkins
