@@ -11,7 +11,7 @@ local-stop:
 local-logs:
 	docker logs jenkins | less
 
-deploy:
+start:
 	aws cloudformation deploy \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--template-file ./cloudformation.yml \
@@ -32,5 +32,5 @@ open:
 		--query "Stacks[0].Outputs[?OutputKey=='JenkinsPublicIp'].OutputValue" --output text) && \
 	$(BROWSER) http://$${JENKINS_PUBLIC_IP}:$(JENKINS_PORT)
 
-remote-stop:
+stop:
 	aws ecs update-service --cluster $(PROJECT_NAME) --service $(PROJECT_NAME) --desired-count 0 --query "service.desiredCount"

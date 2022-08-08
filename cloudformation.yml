@@ -222,7 +222,7 @@ Resources:
     Properties:
       BackupPolicy:
           Status: ENABLED
-      Encrypted: true
+        : true
       FileSystemTags:
         - Key: Name
           Value: jenkins-home 
