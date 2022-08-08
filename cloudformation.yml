@@ -8,7 +8,6 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   JenkinsPort:
     Type: Number
-    Default: 80
   DefaultSecurityGroupId:
     Type: String
     Default: sg-2de20856
@@ -30,6 +29,9 @@ Parameters:
     Default: subnet-57cc420c
   TimeStamp:
     Type: Number
+  HostedZoneId:
+    Type: String
+    Default: Z1V5NVBGOC3M9Z
 
 Resources:
 
@@ -194,6 +196,15 @@ Resources:
               IAM: ENABLED  
     Type: AWS::ECS::TaskDefinition
 
+  EcsSecurityGroupIngress:
+    Properties: 
+      GroupId: !Ref DefaultSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref JenkinsPort
+      ToPort: !Ref JenkinsPort
+      CidrIp: 0.0.0.0/0
+    Type: AWS::EC2::SecurityGroupIngress
+
   ##########################
   # EFS
   ##########################
@@ -210,7 +221,7 @@ Resources:
   JenkinsEfsFileSystem:
     Properties:
       BackupPolicy:
-          Status: DISABLED
+          Status: ENABLED
       Encrypted: true
       FileSystemTags:
         - Key: Name
@@ -240,133 +251,6 @@ Resources:
         Path: '/jenkins-home'
     Type: AWS::EFS::AccessPoint
 
-  ##########################
-  # Proxy Lambda
-  ##########################
-
-  LambdaFunctionRole:
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-              - lambda.amazonaws.com
-          Action:
-            - sts:AssumeRole
-      Path: "/"
-      Policies:
-        - PolicyName: lambda-get-status
-          PolicyDocument:
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                Resource: '*'
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-    Type: AWS::IAM::Role
-
-  LambdaFunction:
-    Properties:
-      Runtime: python3.9
-      Handler: index.handler
-      Role: !GetAtt LambdaFunctionRole.Arn
-      Timeout: 30
-      #Environment:
-      #  Variables:
-      #    EC2_PUBLIC_IP: !GetAtt JenkinsEc2Instance.PublicIp
-      #    EC2_PUBLIC_DNS_NAME: !GetAtt JenkinsEc2Instance.PublicDnsName
-      Code:
-        ZipFile: |
-              import json
-              import boto3
-              client = boto3.client('ec2')
-
-              def dumpEc2State():
-                custom_filter = [{
-                  'Name':'tag:Name',
-                  'Values': ['Jenkins Controller']}]
-                return client.describe_instances(Filters=custom_filter)
-
-              def handler(event, context):
-                ec2_response = dumpEc2State()
-                response = dict()
-                response["headers"] = { "Content-Type": "application/json"}
-                response["isBase64Encoded"] = False
-                response["body"] = json.dumps(ec2_response, default=str)
-                response["statusCode"] = 200
-                return response
-    Type: AWS::Lambda::Function
-
-  ##########################
-  # Api Gateway
-  ##########################
-
-  ApiGateway:
-    Properties:
-      Name: !Ref ProjectName
-      Description: !Ref ProjectName
-    Type: AWS::ApiGateway::RestApi
-
-  ProxyResource:
-    Properties:
-      ParentId: !GetAtt ApiGateway.RootResourceId
-      RestApiId: !Ref ApiGateway
-      PathPart: !Ref ResourceEndpoint
-    Type: AWS::ApiGateway::Resource
-
-  ApiGatewayProxyMethod:
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: !Ref ApiGatewayHTTPMethod
-      ResourceId: !Ref ProxyResource
-      RestApiId: !Ref ApiGateway
-      Integration:
-        IntegrationHttpMethod: POST
-        Type: AWS_PROXY
-        IntegrationResponses:
-          - StatusCode: 200
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}:${!stageVariables.stage}/invocations
-    Type: AWS::ApiGateway::Method
-
-  ApiGatewayDeployment:
-    Properties:
-      RestApiId: !Ref ApiGateway
-    DependsOn:
-      - "ApiGatewayProxyMethod"
-    Type: AWS::ApiGateway::Deployment
-
-  ApiGatewayStage:
-    Properties:
-      RestApiId: !Ref ApiGateway
-      DeploymentId: !Ref ApiGatewayDeployment
-      StageName: !Ref ApiGatewayDevStageName
-      Variables:
-        stage: !Ref ApiGatewayDevStageName
-    Type: AWS::ApiGateway::Stage
-
-  LambdaVersion:
-    Properties:
-      FunctionName: !Ref LambdaFunction
-      Description: Function versionning
-    Type: AWS::Lambda::Version
-
-  LambdaDevAlias:
-    Properties:
-      FunctionName: !Ref LambdaFunction
-      FunctionVersion: $LATEST # !GetAtt LambdaVersion.Version
-      Name: !Ref ApiGatewayDevStageName
-    Type: AWS::Lambda::Alias
-  
-  Permission:
-    Properties:
-      FunctionName: !Ref LambdaDevAlias
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/${ResourceEndpoint}
-    Type: AWS::Lambda::Permission
 
   ##########################
   # Custom resource
@@ -388,7 +272,6 @@ Resources:
       Environment:
         Variables:
           PROJECT_NAME: !Ref ProjectName
-          TIMESTAMP: !Ref TimeStamp
       Code:
         ZipFile: |
           import logging
@@ -481,6 +364,17 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
     Type: AWS::IAM::Role
+
+  JenkinsDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZoneId
+      Name: jenkins.theatomicity.com
+      ResourceRecords:
+      - !GetAtt EcsPublicIp.ip
+      TTL: 900
+      Type: A
+
 Outputs:
   JenkinsPublicIp:
     Value: !GetAtt EcsPublicIp.ip
