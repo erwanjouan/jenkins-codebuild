@@ -8,10 +8,28 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   JenkinsPort:
     Type: Number
-    Default: 8080
+    Default: 80
   DefaultSecurityGroupId:
     Type: String
     Default: sg-2de20856
+  ApiGatewayDevStageName:
+    Type: String
+    AllowedPattern: "[a-z0-9]+"
+    Default: dev
+  ApiGatewayHTTPMethod:
+    Type: String
+    Default: ANY
+  ResourceEndpoint:
+    Type: String
+    Default: api
+  SubNetA:
+    Type: String
+    Default: subnet-a47735c3
+  SubNetB:
+    Type: String
+    Default: subnet-57cc420c
+  TimeStamp:
+    Type: Number
 
 Resources:
 
@@ -81,62 +99,388 @@ Resources:
             Value: eu-west-1
     Type: AWS::CodeBuild::Project
   
-  
   ##########################
-  # EC2 Instance
+  # ECS
   ##########################
 
-  JenkinsSecurityGroupIngress:
-    Properties: 
-      GroupId: !Ref DefaultSecurityGroupId
-      IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
-      CidrIp: 0.0.0.0/0
-    Type: AWS::EC2::SecurityGroupIngress
-
-  JenkinsEc2IamRole:
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
     Properties:
-      RoleName: JenkinsEc2RoleForSSM
-      Description: EC2 IAM role for SSM access
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
+              Service: [ ecs-tasks.amazonaws.com ]
+            Action: [ 'sts:AssumeRole' ]
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  # Allow the ECS Tasks to download images from ECR
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  # Allow the ECS tasks to upload logs to CloudWatch
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  EcsFargateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/fargate/${ProjectName}
+
+  EcsFargateCluster:
+    Description: ECS Cluster
+    Properties:
+      ClusterName: !Ref 'ProjectName'
+    Type: AWS::ECS::Cluster
+
+  EcsFargateService:
+    Description: ECS Service
+    Properties:
+      ServiceName: !Ref 'ProjectName'
+      Cluster: !Ref 'EcsFargateCluster'
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED # to avoid the need for a Load Balancer. Simplifies Image pull (unless a NAT / Route needs to be opened to ECR)
+          SecurityGroups:
+            - !Ref 'DefaultSecurityGroupId'
+          Subnets: [ !Ref SubNetA, !Ref SubNetB ]
+      TaskDefinition: !Ref 'EcsFargateTaskDefinition'
+    Type: AWS::ECS::Service
+
+  EcsFargateTaskDefinition:
+    Description: ECS Task Definition
+    Properties:
+      NetworkMode: awsvpc
+      Family: !Ref ProjectName
+      Cpu: 2048
+      Memory: 4096
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole # Fargate requires task definition to have execution role ARN to support ECR images
+      TaskRoleArn: !Ref ECSTaskExecutionRole
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Ref ProjectName
+          Image: jenkins/jenkins:lts
+          Environment:
+            - Name: JENKINS_OPTS
+              Value: !Sub "--httpPort=${JenkinsPort}"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref EcsFargateLogGroup
+              awslogs-stream-prefix: oam-ecs
+          PortMappings:
+            - ContainerPort: !Ref 'JenkinsPort'
+          MountPoints:
+            - SourceVolume: jenkins-home
+              ContainerPath: /var/jenkins_home
+      Volumes:
+        - Name: jenkins-home
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref JenkinsEfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref JenkinsEfsAccessPointResource
+              IAM: ENABLED  
+    Type: AWS::ECS::TaskDefinition
+
+  ##########################
+  # EFS
+  ##########################
+
+  EfsSecurityGroupIngress:
+    Properties: 
+      GroupId: !Ref DefaultSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      CidrIp: 0.0.0.0/0
+    Type: AWS::EC2::SecurityGroupIngress
+
+  JenkinsEfsFileSystem:
+    Properties:
+      BackupPolicy:
+          Status: DISABLED
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: jenkins-home 
+    DeletionPolicy: Snapshot
+    Type: AWS::EFS::FileSystem
+
+  JenkinsEfsMountTargetSubNetB:
+    Properties:
+      FileSystemId: !Ref JenkinsEfsFileSystem
+      SubnetId: !Ref SubNetB
+      SecurityGroups:
+        - !Ref DefaultSecurityGroupId
+    Type: AWS::EFS::MountTarget
+
+  JenkinsEfsAccessPointResource:
+    Properties:
+      FileSystemId: !Ref JenkinsEfsFileSystem
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: '1000'
+          OwnerUid: '1000'
+          Permissions: '755'
+        Path: '/jenkins-home'
+    Type: AWS::EFS::AccessPoint
+
+  ##########################
+  # Proxy Lambda
+  ##########################
+
+  LambdaFunctionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: lambda-get-status
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: '*'
       ManagedPolicyArns:
-        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
     Type: AWS::IAM::Role
 
-  JenkinsEc2InstanceProfile:
+  LambdaFunction:
     Properties:
-      InstanceProfileName: JenkinsEc2InstanceProfileForSSM
-      Roles:
-        - !Ref JenkinsEc2IamRole
-    Type: AWS::IAM::InstanceProfile
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Timeout: 30
+      #Environment:
+      #  Variables:
+      #    EC2_PUBLIC_IP: !GetAtt JenkinsEc2Instance.PublicIp
+      #    EC2_PUBLIC_DNS_NAME: !GetAtt JenkinsEc2Instance.PublicDnsName
+      Code:
+        ZipFile: |
+              import json
+              import boto3
+              client = boto3.client('ec2')
 
-  JenkinsEc2Instance:
+              def dumpEc2State():
+                custom_filter = [{
+                  'Name':'tag:Name',
+                  'Values': ['Jenkins Controller']}]
+                return client.describe_instances(Filters=custom_filter)
+
+              def handler(event, context):
+                ec2_response = dumpEc2State()
+                response = dict()
+                response["headers"] = { "Content-Type": "application/json"}
+                response["isBase64Encoded"] = False
+                response["body"] = json.dumps(ec2_response, default=str)
+                response["statusCode"] = 200
+                return response
+    Type: AWS::Lambda::Function
+
+  ##########################
+  # Api Gateway
+  ##########################
+
+  ApiGateway:
     Properties:
-      IamInstanceProfile: !Ref JenkinsEc2InstanceProfile
-      InstanceType: t3.small
-      ImageId: !Ref LatestAmiId
-      UserData:
-        Fn::Base64:
-          !Sub |
-            #!/bin/bash
-            yum update -y
-            wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
-            rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key
-            yum upgrade
-            amazon-linux-extras install java-openjdk11 -y
-            yum install -y jenkins git
-            systemctl enable jenkins
-            systemctl start jenkins
-            systemctl status jenkins
-      Tags:
-        - Key: Name
-          Value: 'Jenkins Controller'
+      Name: !Ref ProjectName
+      Description: !Ref ProjectName
+    Type: AWS::ApiGateway::RestApi
 
-    Type: AWS::EC2::Instance
+  ProxyResource:
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      RestApiId: !Ref ApiGateway
+      PathPart: !Ref ResourceEndpoint
+    Type: AWS::ApiGateway::Resource
+
+  ApiGatewayProxyMethod:
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: !Ref ApiGatewayHTTPMethod
+      ResourceId: !Ref ProxyResource
+      RestApiId: !Ref ApiGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}:${!stageVariables.stage}/invocations
+    Type: AWS::ApiGateway::Method
+
+  ApiGatewayDeployment:
+    Properties:
+      RestApiId: !Ref ApiGateway
+    DependsOn:
+      - "ApiGatewayProxyMethod"
+    Type: AWS::ApiGateway::Deployment
+
+  ApiGatewayStage:
+    Properties:
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiGatewayDeployment
+      StageName: !Ref ApiGatewayDevStageName
+      Variables:
+        stage: !Ref ApiGatewayDevStageName
+    Type: AWS::ApiGateway::Stage
+
+  LambdaVersion:
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Description: Function versionning
+    Type: AWS::Lambda::Version
+
+  LambdaDevAlias:
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      FunctionVersion: $LATEST # !GetAtt LambdaVersion.Version
+      Name: !Ref ApiGatewayDevStageName
+    Type: AWS::Lambda::Alias
+  
+  Permission:
+    Properties:
+      FunctionName: !Ref LambdaDevAlias
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/${ResourceEndpoint}
+    Type: AWS::Lambda::Permission
+
+  ##########################
+  # Custom resource
+  ##########################
+
+  EcsPublicIp:
+    Properties:
+      ServiceToken: !GetAtt 'EcsPublicIpRetriever.Arn'
+      TimeStamp: !Ref TimeStamp
+    DependsOn: EcsFargateService
+    Type: Custom::EcsPublicIpRetriever
+
+  EcsPublicIpRetriever:
+    Properties:
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt 'LambdaBasicExecutionRole.Arn'
+      Runtime: python3.9
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          TIMESTAMP: !Ref TimeStamp
+      Code:
+        ZipFile: |
+          import logging
+          import string
+          import boto3
+          import cfnresponse
+          import traceback
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          ecs = boto3.client('ecs')
+          projectName = os.getenv('PROJECT_NAME')
+
+          def get_service_ips(cluster, tasks):
+              tasks_detail = ecs.describe_tasks(
+                  cluster=cluster,
+                  tasks=tasks
+              )
+              # first get the ENIs
+              enis = []
+              for task in tasks_detail.get("tasks", []):
+                  for attachment in task.get("attachments", []):
+                      for detail in attachment.get("details", []):
+                          if detail.get("name") == "networkInterfaceId":
+                              enis.append(detail.get("value"))
+              # now the ips
+              ips = []
+              for eni in enis:
+                  eni_resource = boto3.resource("ec2").NetworkInterface(eni)
+                  ips.append(eni_resource.association_attribute.get("PublicIp"))
+              return ips
+
+          def start_service(clusterServiceName):
+            service_update = ecs.update_service(
+                  cluster=clusterServiceName,
+                  service=clusterServiceName,
+                  desiredCount=1)
+            logger.info('service_update {}'.format(service_update))
+            waiter = ecs.get_waiter('services_stable')
+            waiter.wait(cluster=clusterServiceName,services=[clusterServiceName])
+            
+          def list_tasks(clusterServiceName):
+            task_list = ecs.list_tasks(
+                  cluster=clusterServiceName,
+                  serviceName=clusterServiceName,
+                  launchType='FARGATE')
+            return task_list['taskArns']
+            
+          def lambda_handler(event, context):
+            try:
+              logger.info('got event {}'.format(event))
+              responseData = {}
+              if event['RequestType'] in ['Create', 'Update']:
+                start_service(projectName)
+                task_arns = list_tasks(projectName)
+                public_ips = get_service_ips(projectName,task_arns)
+                responseData['ip'] = public_ips[0]
+              logger.info('responseData {}'.format(responseData))
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, 'CustomResourcePhysicalID')
+            except Exception:
+              # Sending FAILED signal to CloudFormation
+              logger.info('Exception {}'.format(traceback.format_exc()))
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData, 'CustomResourcePhysicalID')
+    Type: AWS::Lambda::Function
+
+  LambdaBasicExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+          Condition: {}
+      Path: /
+      Policies:
+        - PolicyName: lambda-get-ecs-public-ip
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: ecs:*
+                Resource: '*'
+        - PolicyName: ec2-describe-netinterface
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeNetworkInterfaces
+                Resource: '*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Type: AWS::IAM::Role
+Outputs:
+  JenkinsPublicIp:
+    Value: !GetAtt EcsPublicIp.ip

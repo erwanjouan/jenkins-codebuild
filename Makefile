@@ -1,10 +1,12 @@
 PROJECT_NAME:= codebuild-jenkins-slave
 
-start:
+local-start:
 	docker-compose up #-d
-stop:
+
+local-stop:
 	docker-compose down
-logs:
+
+local-logs:
 	docker logs jenkins | less
 
 deploy:
@@ -13,7 +15,13 @@ deploy:
 		--template-file ./cloudformation.yml \
 		--stack-name $(PROJECT_NAME) \
 		--parameter-overrides \
-			ProjectName=${PROJECT_NAME}
+			ProjectName=${PROJECT_NAME} \
+			TimeStamp=$$(date +%s) # Forces update
+
 destroy:
+	aws s3 rm s3://$(PROJECT_NAME)-output --recursive && \
 	aws cloudformation delete-stack \
         --stack-name $(PROJECT_NAME)
+
+remote-stop:
+	aws ecs update-service --cluster $(PROJECT_NAME) --service $(PROJECT_NAME) --desired-count 0 --query "service.desiredCount"

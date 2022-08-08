@@ -24,3 +24,6 @@ https://www.jenkins.io/doc/tutorials/tutorial-for-installing-jenkins-on-AWS/
 - Make views
 - Add projects
 
+## Jenkins on ECS
+
+https://tomgregory.com/deploy-jenkins-into-aws-ecs/
