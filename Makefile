@@ -19,12 +19,12 @@ start:
 		--parameter-overrides \
 			ProjectName=$(PROJECT_NAME) \
 			JenkinsPort=$(JENKINS_PORT) \
-			TimeStamp=$$(date +%s) # Forces update
+			TimeStamp=$$(date +%s) # Forces Dns resolution with new Ip
 
 destroy:
 	aws s3 rm s3://$(PROJECT_NAME)-output --recursive && \
 	aws cloudformation delete-stack \
-        --stack-name $(PROJECT_NAME)
+		--stack-name $(PROJECT_NAME)
 
 open:
 	JENKINS_PUBLIC_IP=$$(aws cloudformation describe-stacks \
