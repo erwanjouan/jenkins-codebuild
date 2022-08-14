@@ -79,6 +79,9 @@ Resources:
           - Name: AWS_DEFAULT_REGION
             Type: PLAINTEXT
             Value: eu-west-1
+      Cache:
+        Location: !Sub ${ArtifactOutputBucket}/cache
+        Type: S3
     Type: AWS::CodeBuild::Project
   
   ##########################
