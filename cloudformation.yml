@@ -3,9 +3,6 @@ Description: A CodeBuild Project to trigger AWS CLI command from AWS
 Parameters:
   ProjectName:
     Type: String
-  LatestAmiId:
-    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   JenkinsPort:
     Type: Number
   DefaultSecurityGroupId:
@@ -67,7 +64,7 @@ Resources:
       ServiceRole: !Ref CodeBuildServiceRole
       Source:
         Type: GITHUB
-        Location: https://github.com/erwanjouan/aws-dev-spring-boot-dockerfile
+        Location: https://github.com/erwanjouan/aws-dev-spring-boot-jar
       Artifacts:
         Type: NO_ARTIFACTS
       Environment:
